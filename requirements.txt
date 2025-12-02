@@ -1,0 +1,8 @@
+runpod
+openai>=1.0.0
+torch
+torchaudio
+whisper
+pysubs2
+requests
+ffmpeg-python
