@@ -1,8 +1,18 @@
 runpod
-openai>=1.0.0
+openai
+
+# Whisper (transcription)
+openai-whisper
 torch
-torchaudio
-whisper
-pysubs2
-requests
+numpy
+
+# Vidéo / audio
 ffmpeg-python
+moviepy
+pydub
+
+# Sous-titres avancés
+pysubs2
+
+# Pour télécharger la vidéo depuis une URL
+requests

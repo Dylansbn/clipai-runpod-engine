@@ -1,17 +1,18 @@
 import os
 import json
+import subprocess
 from pathlib import Path
 from typing import List, Dict, Any
 
-import torch
-import whisper
+import whisper              # openai-whisper
 import pysubs2
+import ffmpeg               # ffmpeg-python, utilisé si besoin
 from openai import OpenAI
-import subprocess
 
 # ==============================
-# CONFIG BASE
+#  CONFIG & DOSSIERS
 # ==============================
+
 BASE_DIR = Path(__file__).resolve().parent
 UPLOADS_DIR = BASE_DIR / "uploads"
 SHORTS_DIR = BASE_DIR / "shorts"
@@ -21,36 +22,50 @@ for d in (UPLOADS_DIR, SHORTS_DIR, SUBS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 # ==============================
-# OPENAI CLIENT (project-based)
+#  CLIENT OPENAI
 # ==============================
+
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
-    project=os.getenv("OPENAI_PROJECT_ID"),
-    organization=os.getenv("OPENAI_ORG_ID") or None,
+    project=os.getenv("OPENAI_PROJECT_ID")
 )
 
-# ==============================
-# 1. TRANSCRIPTION WHISPER (GPU)
-# ==============================
-_WHISPER_MODEL = None
+if client.api_key is None:
+    print("⚠️  OPENAI_API_KEY manquant dans les variables d'environnement.")
 
-def get_whisper_model(model_name: str = "small") -> whisper.Whisper:
+# ==============================
+# 1. TRANSCRIPTION WHISPER
+# ==============================
+
+_WHISPER_MODEL = None  # cache global pour éviter de recharger à chaque job
+
+
+def get_whisper_model(model_name: str = "small"):
+    """
+    Charge le modèle Whisper une seule fois (cache global).
+    Pas d'annotation de type en whisper.Whisper => évite le bug AttributeError.
+    """
     global _WHISPER_MODEL
     if _WHISPER_MODEL is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _WHISPER_MODEL = whisper.load_model(model_name, device=device)
+        print(f"🧠 Chargement du modèle Whisper '{model_name}'...")
+        _WHISPER_MODEL = whisper.load_model(model_name)
+        print("✅ Whisper chargé.")
     return _WHISPER_MODEL
 
 
 def transcribe_with_whisper(video_path: str, model_name: str = "small") -> Dict[str, Any]:
+    """
+    Transcription de la vidéo avec timecodes par segment.
+    """
     model = get_whisper_model(model_name)
+    print(f"🎙️ Transcription de {video_path} ...")
     result = model.transcribe(video_path, verbose=False)
 
     segments = [
         {
             "start": float(seg["start"]),
             "end": float(seg["end"]),
-            "text": seg["text"].strip(),
+            "text": seg["text"].strip()
         }
         for seg in result.get("segments", [])
     ]
@@ -61,30 +76,36 @@ def transcribe_with_whisper(video_path: str, model_name: str = "small") -> Dict[
     }
 
 # ==============================
-# 2. IA VIRALE (GPT-4.1)
+# 2. IA VIRALE (GPT-4.1-mini)
 # ==============================
+
+
 def select_viral_segments(
     segments: List[Dict[str, Any]],
     num_clips: int = 8,
     min_duration: float = 20.0,
     max_duration: float = 45.0,
-    language: str = "fr",
+    language: str = "fr"
 ) -> List[Dict[str, Any]]:
+    """
+    Utilise GPT pour choisir les meilleurs moments viraux.
+    Retourne une liste de dicts : {start, end, title, reason}
+    """
+
+    if not segments:
+        return []
 
     transcript_for_ai = [
         f"[{s['start']:.2f} → {s['end']:.2f}] {s['text']}"
         for s in segments
     ]
-
-    joined = "\n".join(transcript_for_ai)
-    # Limite de sécurité pour ne pas exploser le prompt
-    joined = joined[:15000]
+    joined = "\n".join(transcript_for_ai)[:15000]
 
     system_prompt = (
         "Tu es un expert TikTok/YouTube Shorts. "
-        "Tu sélectionnes les moments les plus viraux, avec hook fort, émotions, punchlines. "
-        f"Durée cible des extraits : {min_duration}-{max_duration} secondes. "
-        "Réponds uniquement en JSON strict, sans texte autour."
+        "Tu sélectionnes les moments les plus viraux, avec un hook fort au début. "
+        f"Chaque clip doit durer entre {min_duration} et {max_duration} secondes. "
+        "Réponds STRICTEMENT en JSON."
     )
 
     user_prompt = f"""
@@ -95,23 +116,21 @@ Transcription avec timecodes :
 Tâche :
 - Choisir les {num_clips} meilleurs moments viraux.
 - Durée entre {min_duration} et {max_duration} secondes.
-- Hook fort au début de chaque clip.
+- Hook fort dès les 3 premières secondes.
 - Ne coupe pas au milieu d'un mot.
-- Réponds en JSON strict de la forme :
+- Réponds uniquement en JSON de la forme :
+
 {{
   "clips": [
-    {{
-      "start": float,
-      "end": float,
-      "title": "Titre court",
-      "reason": "Pourquoi ce moment est viral"
-    }}
+    {{"start": 12.5, "end": 34.0, "title": "Titre accrocheur", "reason": "Pourquoi c'est viral"}},
+    ...
   ]
 }}
 
-Réponds en langue : {language}.
+Réponds en {language}.
 """
 
+    print("🤖 Appel GPT pour sélection virale...")
     response = client.responses.create(
         model="gpt-4.1-mini",
         input=[
@@ -120,24 +139,25 @@ Réponds en langue : {language}.
         ],
     )
 
-    raw = response.output[0].content[0].text
+    raw_text = response.output[0].content[0].text
+    # Debug léger dans les logs
+    print("🔎 Réponse brute GPT (début) :", raw_text[:500])
 
     try:
-        data = json.loads(raw)
+        data = json.loads(raw_text)
         clips = data.get("clips", [])
-    except Exception:
+    except Exception as e:
+        print("⚠️ Impossible de parser le JSON renvoyé par GPT :", e)
         clips = []
 
     final_clips: List[Dict[str, Any]] = []
+
     for c in clips:
         try:
             start = float(c["start"])
             end = float(c["end"])
             if end <= start:
                 continue
-            if (end - start) < min_duration or (end - start) > max_duration:
-                # on peut filtrer léger, mais on reste souple
-                pass
 
             final_clips.append(
                 {
@@ -150,12 +170,18 @@ Réponds en langue : {language}.
         except Exception:
             continue
 
+    print(f"✅ Clips viraux sélectionnés : {len(final_clips)}")
     return final_clips
 
 # ==============================
-# 3. SOUS-TITRES KARAOKÉ STYLE KLAP
+# 3. SOUS-TITRES KARAOKÉ (STYLE KLAP)
 # ==============================
+
+
 def build_karaoke_text(text: str, start_sec: float, end_sec: float) -> str:
+    """
+    Convertit une phrase en séquence karaoke \kxxx pour ASS.
+    """
     words = [w for w in text.strip().split() if w]
     if not words:
         return ""
@@ -173,21 +199,22 @@ def generate_ass_subs_for_clip(
     segments: List[Dict[str, Any]],
     subs_path: Path,
 ):
+    """
+    Crée un fichier .ass avec un style centré, jaune, outline noir, karaoke.
+    """
     subs = pysubs2.SSAFile()
 
     style = pysubs2.SSAStyle()
     style.name = "Klap"
     style.fontname = "Poppins"
-    style.fontsize = 64
+    style.fontsize = 58
     style.bold = True
-    style.borderstyle = 3           # fond opaque
-    style.outline = 6               # gros contour noir
-    style.shadow = 3
-    style.primarycolor = pysubs2.Color.from_hex("#FFD400")  # jaune
-    style.outlinecolor = pysubs2.Color.from_hex("#000000")  # noir
-    style.backcolor = pysubs2.Color.from_hex("#00000080")   # fond noir semi-transparent
-    style.marginv = 40
-    style.alignment = 2             # bas centre
+    style.borderstyle = 1
+    style.outline = 4
+    style.primarycolor = pysubs2.Color(255, 255, 0)  # jaune
+    style.outlinecolor = pysubs2.Color(0, 0, 0)      # noir
+    style.shadow = 0
+    style.alignment = 2  # centre bas
     subs.styles[style.name] = style
 
     for seg in segments:
@@ -212,14 +239,15 @@ def generate_ass_subs_for_clip(
         ev.end = int(local_end * 1000)
         ev.style = "Klap"
         ev.text = kar
-
         subs.events.append(ev)
 
     subs.save(str(subs_path), format="ass")
 
 # ==============================
-# 4. FFMPEG GPU : CUT + 9:16 + SUBS
+# 4. FFMPEG : CUT + FORMAT 9:16 + SUBS
 # ==============================
+
+
 def ffmpeg_extract_and_style(
     input_video: Path,
     output_video: Path,
@@ -227,14 +255,16 @@ def ffmpeg_extract_and_style(
     start: float,
     end: float,
 ):
+    """
+    Utilise ffmpeg pour :
+    - couper au bon timing
+    - mettre au format 9:16 (1080x1920)
+    - incruster les sous-titres ASS
+    """
     duration = max(end - start, 0.5)
 
-    # Filtre 9:16 + sous-titres
-    vf = (
-        "scale=w=-1:h=1920:force_original_aspect_ratio=decrease,"
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
-        f"subtitles='{subs_path}'"
-    )
+    # filtre vidéo : mise à l'échelle puis crop 9:16 + sous-titres
+    vf = f"scale=-2:1920,crop=1080:1920,subtitles='{subs_path}'"
 
     cmd = [
         "ffmpeg",
@@ -248,7 +278,7 @@ def ffmpeg_extract_and_style(
         "-vf",
         vf,
         "-c:v",
-        "h264",
+        "libx264",
         "-preset",
         "veryfast",
         "-crf",
@@ -260,42 +290,49 @@ def ffmpeg_extract_and_style(
         str(output_video),
     ]
 
+    print("🎬 Commande ffmpeg :", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
+
 # ==============================
-# 5. PIPELINE GLOBAL : 1 vidéo → N shorts
+# 5. PIPELINE GLOBAL
 # ==============================
+
+
 def generate_shorts(
     input_video_path: str,
     num_clips: int = 8,
     min_duration: float = 20.0,
     max_duration: float = 45.0,
-    language: str = "fr",
 ) -> List[Dict[str, Any]]:
-
+    """
+    Pipeline complet :
+    - transcription Whisper
+    - sélection IA virale
+    - génération sous-titres .ass
+    - ffmpeg 9:16 avec sous-titres incrustés
+    """
     video = Path(input_video_path)
     if not video.exists():
-        raise FileNotFoundError(f"Video not found: {video}")
+        raise FileNotFoundError(video)
 
-    # 1) Transcription
-    transcription = transcribe_with_whisper(str(video))
-    segments = transcription["segments"]
+    print(f"🚀 Démarrage pipeline sur {video}")
 
-    if not segments:
-        return []
+    # 1. Transcription
+    t = transcribe_with_whisper(str(video))
+    segs = t["segments"]
 
-    # 2) IA virale pour choisir les meilleurs moments
+    # 2. IA virale (GPT)
     viral_clips = select_viral_segments(
-        segments=segments,
+        segments=segs,
         num_clips=num_clips,
         min_duration=min_duration,
         max_duration=max_duration,
-        language=language,
     )
 
     results: List[Dict[str, Any]] = []
 
-    # 3) Génération des shorts
+    # 3. Génération des shorts
     for i, clip in enumerate(viral_clips, start=1):
         start = clip["start"]
         end = clip["end"]
@@ -303,8 +340,12 @@ def generate_shorts(
         out_video = SHORTS_DIR / f"short_{i:02d}.mp4"
         out_subs = SUBS_DIR / f"short_{i:02d}.ass"
 
-        generate_ass_subs_for_clip(start, end, segments, out_subs)
+        print(f"▶️ Clip {i} | {start:.2f}s → {end:.2f}s")
 
+        # Sous-titres
+        generate_ass_subs_for_clip(start, end, segs, out_subs)
+
+        # ffmpeg
         ffmpeg_extract_and_style(
             input_video=video,
             output_video=out_video,
@@ -325,4 +366,5 @@ def generate_shorts(
             }
         )
 
+    print("✅ Pipeline terminé, shorts générés :", len(results))
     return results

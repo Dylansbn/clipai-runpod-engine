@@ -1,19 +1,19 @@
-FROM python:3.10-slim
+FROM runpod/serverless:3.0.0
 
+# On travaille dans /app
 WORKDIR /app
 
-# Installer FFmpeg
-RUN apt update && apt install -y ffmpeg && apt clean
-
-# Copier requirements
+# Copie des dépendances
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copier tout le code
+# Installation des libs Python + ffmpeg
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copie du code
 COPY . .
 
-# Exposer le port (obligatoire pour RunPod même si pas utilisé)
-EXPOSE 8000
-
-# Lancer le handler RunPod
-CMD ["python", "handler.py"]
+# On lance le worker RunPod
+CMD ["python", "-u", "handler.py"]
