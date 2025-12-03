@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 import pysubs2
+from yt_dlp import YoutubeDL
 from openai import OpenAI
 
 
 # ==============================
-#  CONFIG & DOSSIERS
+#  CONFIG
 # ==============================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,22 +21,44 @@ SUBS_DIR = BASE_DIR / "subs"
 for d in (UPLOADS_DIR, SHORTS_DIR, SUBS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-# ==============================
-#  CLIENT OPENAI
-# ==============================
-
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    project=os.getenv("OPENAI_PROJECT_ID"),
-)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 # ==============================
-# 1. TRANSCRIPTION WHISPER API  – FIX TOTAL
+# 0. DOWNLOAD ROBUSTE (yt-dlp)
+# ==============================
+
+def download_video(url: str) -> str:
+    """Télécharge TOUTES les vidéos (YouTube, TikTok, Vimeo, mp4 direct…)."""
+    print(f"⬇️ Téléchargement vidéo via yt-dlp : {url}")
+
+    output_file = UPLOADS_DIR / f"input_{os.urandom(4).hex()}.mp4"
+    ydl_opts = {
+        "outtmpl": str(output_file),
+        "format": "mp4/best/bestvideo+bestaudio",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True
+    }
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        raise Exception(f"Erreur téléchargement vidéo (yt-dlp) : {str(e)}")
+
+    if not output_file.exists():
+        raise Exception("Téléchargement échoué : fichier non trouvé après yt-dlp")
+
+    print(f"✅ Vidéo téléchargée → {output_file}")
+    return str(output_file)
+
+
+# ==============================
+# 1. TRANSCRIPTION WHISPER API
 # ==============================
 
 def transcribe_with_whisper(video_path: str) -> Dict[str, Any]:
-    """Transcription via Whisper API (pas de modèle local)."""
     print("🎙️ Envoi vidéo → Whisper API ...")
 
     with open(video_path, "rb") as f:
@@ -45,16 +68,14 @@ def transcribe_with_whisper(video_path: str) -> Dict[str, Any]:
             response_format="verbose_json"
         )
 
-    # FIX : res.segments = objets, pas des dicts
-    segments = []
-    for s in res.segments:
-        segments.append({
+    segments = [
+        {
             "start": float(s.start),
             "end": float(s.end),
             "text": s.text.strip()
-        })
-
-    print(f"📌 Segments générés : {len(segments)}")
+        }
+        for s in res.segments
+    ]
 
     return {
         "text": res.text.strip(),
@@ -63,28 +84,26 @@ def transcribe_with_whisper(video_path: str) -> Dict[str, Any]:
 
 
 # ==============================
-# 2. IA VIRALE (GPT) — FIX JSON + modèle chat complet
+# 2. IA VIRALE GPT
 # ==============================
 
 def select_viral_segments(
     segments: List[Dict[str, Any]],
-    num_clips: int = 8,
-    min_duration: float = 20.0,
-    max_duration: float = 45.0,
-) -> List[Dict[str, Any]]:
-
+    num_clips: int,
+    min_duration: float,
+    max_duration: float
+):
     if not segments:
         return []
 
     transcript = "\n".join(
-        f"[{s['start']:.2f} → {s['end']:.2f}] {s['text']}"
+        f"[{s['start']:.2f}->{s['end']:.2f}] {s['text']}"
         for s in segments
     )[:15000]
 
     system_prompt = (
-        "Tu es un expert TikTok/Shorts. "
-        "Tu choisis les moments les plus viraux avec un hook fort. "
-        "Réponds STRICTEMENT en JSON : {\"clips\": [{\"start\": x, \"end\": y, \"title\": \"\", \"reason\": \"\"}]}"
+        "Tu es expert TikTok. Sélectionne les meilleurs moments viraux. "
+        "Réponds en strict JSON."
     )
 
     user_prompt = f"""
@@ -92,70 +111,58 @@ Transcription :
 
 {transcript}
 
-Choisis {num_clips} clips de {min_duration}-{max_duration} secondes.
-Réponds en JSON strict.
+Choisis {num_clips} clips de {min_duration} à {max_duration} secondes.
+
+Format JSON :
+{{
+ "clips":[
+   {{"start":0,"end":20,"title":"Titre","reason":"..."}}
+ ]
+}}
 """
 
-    print("🤖 Appel GPT...")
     completion = client.chat.completions.create(
         model="gpt-4.1-mini",
+        response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
-        ],
-        response_format={"type": "json_object"},
+        ]
     )
 
-    raw = completion.choices[0].message.content
-    print("🔎 JSON IA reçu :", raw[:300])
+    data = json.loads(completion.choices[0].message.content)
+    clips = data.get("clips", [])
 
-    try:
-        data = json.loads(raw)
-        clips = data.get("clips", [])
-    except:
-        clips = []
-
-    # Validation
     final = []
     for c in clips:
         try:
-            s = float(c["start"])
-            e = float(c["end"])
-            if e > s:
+            if float(c["end"]) > float(c["start"]):
                 final.append({
-                    "start": s,
-                    "end": e,
-                    "title": c.get("title", "Clip viral"),
+                    "start": float(c["start"]),
+                    "end": float(c["end"]),
+                    "title": c.get("title", "Clip"),
                     "reason": c.get("reason", "")
                 })
         except:
             pass
 
-    print(f"✅ Clips retenus : {len(final)}")
     return final
 
 
 # ==============================
-# 3. SOUS-TITRES KARAOKÉ (STYLE KLAP)
+# 3. GÉNÉRATION SOUS-TITRES .ASS
 # ==============================
 
-def build_karaoke_text(text: str, start_sec: float, end_sec: float) -> str:
+def build_karaoke_text(text, start_sec, end_sec):
     words = text.split()
     if not words:
         return ""
-
-    duration = max((end_sec - start_sec) * 1000, 1)
-    per = max(int(duration / len(words)), 1)
-
+    duration_ms = max((end_sec - start_sec) * 1000, 1)
+    per = max(int(duration_ms / len(words)), 1)
     return " ".join([f"{{\\k{per}}}{w}" for w in words])
 
 
-def generate_ass_subs_for_clip(
-    clip_start: float,
-    clip_end: float,
-    segments: List[Dict[str, Any]],
-    subs_path: Path,
-):
+def generate_ass_subs_for_clip(clip_start, clip_end, segments, subs_path):
     subs = pysubs2.SSAFile()
 
     style = pysubs2.SSAStyle()
@@ -176,45 +183,37 @@ def generate_ass_subs_for_clip(
         start = max(seg["start"], clip_start) - clip_start
         end = min(seg["end"], clip_end) - clip_start
 
-        kar = build_karaoke_text(seg["text"], seg["start"], seg["end"])
-        if not kar:
-            continue
-
         ev = pysubs2.SSAEvent()
         ev.start = int(start * 1000)
         ev.end = int(end * 1000)
         ev.style = "Klap"
-        ev.text = kar
+        ev.text = build_karaoke_text(seg["text"], seg["start"], seg["end"])
         subs.events.append(ev)
 
     subs.save(str(subs_path))
 
 
 # ==============================
-# 4. FFMPEG : CUT + FORMAT 9:16 + SUBS
+# 4. FFMPEG (CUT + CROP + SUBS)
 # ==============================
 
-def ffmpeg_extract_and_style(input_video: Path, output_video: Path, subs: Path, start: float, end: float):
-    """Découpe + crop 9:16 + sous-titres."""
+def ffmpeg_extract_and_style(src, out, subs, start, end):
     duration = max(end - start, 0.5)
-
-    vf = f"scale=-2:1920,crop=1080:1920,subtitles='{subs}'"
 
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start),
-        "-i", str(input_video),
+        "-i", src,
         "-t", str(duration),
-        "-vf", vf,
+        "-vf", f"scale=-2:1920,crop=1080:1920,subtitles='{subs}'",
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "18",
         "-c:a", "aac",
         "-b:a", "160k",
-        str(output_video)
+        out
     ]
 
-    print("🎬 FFmpeg :", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
 
@@ -222,41 +221,29 @@ def ffmpeg_extract_and_style(input_video: Path, output_video: Path, subs: Path, 
 # 5. PIPELINE GLOBAL
 # ==============================
 
-def generate_shorts(input_video_path: str, num_clips: int = 8, min_duration: float = 20, max_duration: float = 45):
-    video = Path(input_video_path)
-    if not video.exists():
-        raise FileNotFoundError(video)
+def generate_shorts(input_video_path, num_clips=8, min_duration=20, max_duration=45):
 
-    print("🚀 Lancement pipeline…")
-
-    # 1. Transcription Whisper API
-    tr = transcribe_with_whisper(str(video))
+    tr = transcribe_with_whisper(input_video_path)
     segments = tr["segments"]
 
-    # 2. IA virale (GPT)
     viral = select_viral_segments(segments, num_clips, min_duration, max_duration)
 
     results = []
 
-    # 3. Génération des shorts
     for i, c in enumerate(viral, start=1):
         out_vid = SHORTS_DIR / f"short_{i:02d}.mp4"
         out_ass = SUBS_DIR / f"short_{i:02d}.ass"
 
-        print(f"▶️ Clip {i} | {c['start']} → {c['end']}")
-
         generate_ass_subs_for_clip(c["start"], c["end"], segments, out_ass)
-        ffmpeg_extract_and_style(video, out_vid, out_ass, c["start"], c["end"])
+        ffmpeg_extract_and_style(input_video_path, str(out_vid), str(out_ass), c["start"], c["end"])
 
         results.append({
             "index": i,
             "title": c["title"],
-            "reason": c["reason"],
             "start": c["start"],
             "end": c["end"],
             "video_path": str(out_vid),
-            "subs_path": str(out_ass),
+            "subs_path": str(out_ass)
         })
 
-    print("🎉 Shorts générés :", len(results))
     return results
