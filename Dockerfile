@@ -1,8 +1,3 @@
-# FORCE_REBUILD_14
-# (HARD RESET)
-# (ANY CHANGE HERE FORCES CACHE BREAK)
-FROM python:3.10-slim
-
 FROM python:3.10-slim
 
 # ========== INSTALL SYSTEM DEPS ==========
@@ -19,8 +14,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# yt-dlp obligatoire pour TikTok / YouTube / Vimeo protégé
-RUN pip install --no-cache-dir yt-dlp
+# yt-dlp + pysubs2 au cas où ils ne sont pas dans requirements.txt
+RUN pip install --no-cache-dir yt-dlp pysubs2
 
 # ========== COPY PROJECT ==========
 COPY . .

@@ -33,12 +33,14 @@ client = OpenAI(
 
 
 # ==============================
-# 0. TÉLÉCHARGEMENT ROBUSTE (YT, TikTok, Vimeo…)
+# 0. TÉLÉCHARGEMENT ROBUSTE (YT / TikTok / Vimeo)
 # ==============================
 
 def download_video(url: str) -> str:
-    """Téléchargement robuste avec yt-dlp (YouTube, TikTok, Vimeo…)."""
-
+    """
+    Télécharge une vidéo via yt-dlp (YouTube, TikTok, Vimeo, etc.)
+    et renvoie le chemin local vers un .mp4.
+    """
     print(f"⬇️ Downloading: {url}")
 
     output_path = UPLOADS_DIR / f"input_{os.urandom(4).hex()}.mp4"
@@ -49,8 +51,12 @@ def download_video(url: str) -> str:
         "no_warnings": True,
         "geo_bypass": True,
         "noprogress": True,
-        "format": "mp4/best",
-        "user_agent": "Mozilla/5.0",
+        "format": "mp4/best/bestvideo+bestaudio",
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
         "retries": 5,
     }
 
@@ -60,7 +66,28 @@ def download_video(url: str) -> str:
     except Exception as e:
         raise Exception(f"yt-dlp a échoué : {e}")
 
-    print(f"✅ Download OK → {output_path}")
+    if not output_path.exists():
+        raise Exception("Téléchargement échoué : fichier inexistant après yt-dlp.")
+
+    size = output_path.stat().st_size
+    print(f"📦 Taille fichier : {size} bytes")
+
+    if size < 80_000:  # ~80 ko = probablement HTML / erreur
+        raise Exception("Fichier téléchargé trop petit (<80ko) → probablement pas une vraie vidéo.")
+
+    # Vérif ffprobe
+    probe_cmd = [
+        "ffprobe", "-v", "error",
+        "-show_format", "-show_streams",
+        str(output_path)
+    ]
+    probe = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    if probe.returncode != 0:
+        err = probe.stderr.decode("utf-8", errors="ignore")
+        raise Exception(f"ffprobe : fichier illisible ou non supporté → {err}")
+
+    print("✅ Vidéo téléchargée & validée (OK pour Whisper).")
     return str(output_path)
 
 
@@ -69,7 +96,7 @@ def download_video(url: str) -> str:
 # ==============================
 
 def transcribe_with_whisper(video_path: str) -> Dict[str, Any]:
-    """Transcription via Whisper API (pas de modèle local)."""
+    """Transcription via Whisper API."""
     print("🎙️ Envoi → Whisper API ...")
 
     with open(video_path, "rb") as f:
@@ -79,7 +106,6 @@ def transcribe_with_whisper(video_path: str) -> Dict[str, Any]:
             response_format="verbose_json"
         )
 
-    # Convert segments (objets → dicts)
     segments = [{
         "start": float(s.start),
         "end": float(s.end),
@@ -115,8 +141,8 @@ def select_viral_segments(
 
     system_prompt = (
         "Tu es un expert TikTok/Shorts. "
-        "Tu choisis les moments les plus viraux. "
-        "Réponds en JSON strict : "
+        "Tu choisis les moments les plus viraux avec un hook fort. "
+        "Réponds STRICTEMENT en JSON : "
         "{\"clips\": [{\"start\": x, \"end\": y, \"title\": \"\", \"reason\": \"\"}]}"
     )
 
@@ -180,12 +206,17 @@ def _sanitize_ass_text(text: str) -> str:
 def _split_into_lines(words: List[str], max_words_per_line: int = 7):
     if len(words) <= max_words_per_line:
         return [words]
-
     mid = len(words) // 2
     return [words[:mid], words[mid:]]
 
 
 def build_karaoke_text(text: str, start: float, end: float) -> str:
+    """
+    Texte karaoké façon Klap :
+    - \k mot par mot
+    - 1–2 lignes
+    - fade in/out léger
+    """
     clean = _sanitize_ass_text(text)
     words = clean.split()
     if not words:
@@ -201,7 +232,7 @@ def build_karaoke_text(text: str, start: float, end: float) -> str:
         parts = [f"{{\\k{per_word}}}{w}" for w in line_words]
         ass_lines.append(" ".join(parts))
 
-    prefix = r"{\an2\fad(80,120)}"  # fade-in/out + alignement bas
+    prefix = r"{\an2\fad(80,120)}"
     return prefix + r"\N".join(ass_lines)
 
 
@@ -232,7 +263,7 @@ def generate_ass_subs_for_clip(
     style.marginl = 40
     style.marginr = 40
     style.marginv = 120
-    style.alignment = 2
+    style.alignment = 2   # bas-centre
 
     subs.styles[style.name] = style
 
@@ -259,7 +290,7 @@ def generate_ass_subs_for_clip(
 
 
 # ==============================
-# 4. FFMPEG : CUT + 9:16 + SUBTITLES
+# 4. FFMPEG : CUT + 9:16 + SUBS
 # ==============================
 
 def ffmpeg_extract_and_style(src: str, out: str, subs: str, start: float, end: float):
@@ -288,7 +319,12 @@ def ffmpeg_extract_and_style(src: str, out: str, subs: str, start: float, end: f
 # 5. PIPELINE GLOBAL
 # ==============================
 
-def generate_shorts(input_video_path: str, num_clips: int = 8, min_duration: float = 20, max_duration: float = 45):
+def generate_shorts(
+    input_video_path: str,
+    num_clips: int = 8,
+    min_duration: float = 20,
+    max_duration: float = 45
+):
 
     print("🚀 Pipeline lancé…")
 
@@ -296,16 +332,16 @@ def generate_shorts(input_video_path: str, num_clips: int = 8, min_duration: flo
     if not video.exists():
         raise FileNotFoundError(video)
 
-    # 1. Transcription
+    # 1) Transcription
     tr = transcribe_with_whisper(str(video))
     segments = tr["segments"]
 
-    # 2. IA virale
+    # 2) IA virale
     viral = select_viral_segments(segments, num_clips, min_duration, max_duration)
 
     results = []
 
-    # 3. Génération
+    # 3) Génération de chaque short
     for i, c in enumerate(viral, start=1):
         out_vid = SHORTS_DIR / f"short_{i:02d}.mp4"
         out_ass = SUBS_DIR / f"short_{i:02d}.ass"
