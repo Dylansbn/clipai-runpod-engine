@@ -9,27 +9,11 @@ from processor import (
     generate_shorts,
 )
 
-
 # ============================================
-#  HANDLER PRINCIPAL — VERSION PRO
+#  HANDLER PRINCIPAL — VERSION STABLE (RUNSYNC)
 # ============================================
 
 def handler(event: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Compatible frontend + CURL :
-
-    event = {
-        "input": {
-            "url": "...",
-            "video_url": "...",
-            "task": "process" | "ping" | "debug_download",
-            "num_clips": 3,
-            "min_duration": 6,
-            "max_duration": 25
-        }
-    }
-    """
-
     print("📩 EVENT REÇU :", event)
 
     try:
@@ -38,46 +22,40 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "error", "error": "Invalid input payload"}
 
         # -------------------------
-        # Extraction des champs
+        # Champs reçus
         # -------------------------
         url = inp.get("video_url") or inp.get("url")
-
-        task = inp.get("task")
-        if not task:
-            # si une URL est présente → tâche = process
-            task = "process" if url else "ping"
+        task = inp.get("task") or ("process" if url else "ping")
 
         num_clips = int(inp.get("num_clips", 3))
-        min_duration = float(inp.get("min_duration", 6))
-        max_duration = float(inp.get("max_duration", 25))
+
+        # DURÉES KLAP v3 (stables)
+        min_duration = float(inp.get("min_duration", 10))
+        max_duration = float(inp.get("max_duration", 50))
 
         print(f"🔧 Task: {task}")
         print(f"🎞 URL: {url}")
-        print(f"🎬 Clips: {num_clips} ({min_duration}s → {max_duration}s)")
+        print(f"🎬 Clips demandés: {num_clips} ({min_duration}s → {max_duration}s)")
 
         # ============================================
-        # 1️⃣ TASK : PING — Vérifier si le moteur tourne
+        # 1️⃣ PING
         # ============================================
         if task == "ping":
             return {
                 "status": "ok",
                 "message": "ClipAI Engine Alive 🔥",
-                "version": "serverless-pro"
+                "version": "stable-runsync"
             }
 
         # ============================================
-        # 2️⃣ TASK : Téléchargement simple
+        # 2️⃣ DEBUG DOWNLOAD
         # ============================================
         if task == "debug_download":
             if not url:
                 return {"status": "error", "error": "Missing URL"}
 
-            print("⬇️ Téléchargement simple…")
             local_path = download_video(url)
-
             size = os.path.getsize(local_path)
-
-            print(f"📦 Fichier téléchargé : {size/1_000_000:.2f} MB")
 
             return {
                 "status": "downloaded",
@@ -86,7 +64,7 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             }
 
         # ============================================
-        # 3️⃣ TASK : Pipeline complet (shorts)
+        # 3️⃣ PROCESS (pipeline complet)
         # ============================================
         if task == "process":
             if not url:
@@ -97,10 +75,8 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
 
             print("🎥 Génération des shorts…")
             clips = generate_shorts(
-                input_video_path=local_path,
+                video_path=local_path,
                 num_clips=num_clips,
-                min_duration=min_duration,
-                max_duration=max_duration,
             )
 
             print(f"✅ {len(clips)} clips générés")
@@ -113,16 +89,12 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         # ============================================
         # 4️⃣ Task inconnue
         # ============================================
-        return {
-            "status": "error",
-            "error": f"Unknown task: {task}"
-        }
+        return {"status": "error", "error": f"Unknown task: {task}"}        
 
     except Exception as e:
         print("🔥 ERREUR handler :", e)
         print(traceback.format_exc())
 
-        # Toujours retourner un format 100% exploitable par ton frontend
         return {
             "status": "error",
             "error": str(e),
@@ -130,7 +102,5 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
-# ============================================
-#  RUNPOD — Entrée du worker
-# ============================================
+# ENTRYPOINT RUNSYNC
 runpod.serverless.start({"handler": handler})

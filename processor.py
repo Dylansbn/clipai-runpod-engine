@@ -1,9 +1,8 @@
 import os
 import json
-import time
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Dict, Any
 from urllib.parse import urlparse
 
 import pysubs2
@@ -12,10 +11,9 @@ import boto3
 import requests
 from openai import OpenAI
 
-
-# ==============================
-#  CONFIG & DOSSIERS
-# ==============================
+# ==========================================
+# DOSSIERS
+# ==========================================
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOADS_DIR = BASE_DIR / "uploads"
@@ -25,210 +23,159 @@ SUBS_DIR = BASE_DIR / "subs"
 for d in (UPLOADS_DIR, SHORTS_DIR, SUBS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-# ==============================
-#  CLIENT OPENAI
-# ==============================
+# ==========================================
+# OPENAI
+# ==========================================
 
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     project=os.getenv("OPENAI_PROJECT_ID"),
 )
 
-# ==============================
-#  CLIENT R2 (S3 compatible)
-# ==============================
+# ==========================================
+# CLOUDFLARE R2
+# ==========================================
 
-def get_r2_client():
-    access = os.getenv("R2_ACCESS_KEY_ID")
-    secret = os.getenv("R2_SECRET_ACCESS_KEY")
-    endpoint = os.getenv("R2_ENDPOINT_URL")
-
-    if not (access and secret and endpoint):
-        print("ℹ️ R2 non configuré → on travaille en local.")
+def get_r2():
+    if not (
+        os.getenv("R2_ACCESS_KEY_ID")
+        and os.getenv("R2_SECRET_ACCESS_KEY")
+        and os.getenv("R2_ENDPOINT_URL")
+    ):
+        print("⚠️ R2 OFF → local mode")
         return None
 
-    session = boto3.session.Session()
-    return session.client(
-        service_name="s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access,
-        aws_secret_access_key=secret,
+    return boto3.client(
+        "s3",
+        endpoint_url=os.getenv("R2_ENDPOINT_URL"),
+        aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
         region_name="auto",
     )
 
 
-def upload_to_r2(local_path: str, key_prefix: str = "") -> str:
-    s3 = get_r2_client()
+def upload_to_r2(local_path: str, prefix=""):
+    s3 = get_r2()
     bucket = os.getenv("R2_BUCKET_NAME")
 
     if not s3 or not bucket:
         return local_path
 
-    local = Path(local_path)
-    key_prefix = key_prefix.strip("/")
-    key = f"{key_prefix}/{local.name}" if key_prefix else local.name
-
-    print(f"☁️ Upload vers R2 : {key}")
-
-    content_type = "video/mp4" if local.suffix.lower() == ".mp4" else "text/plain"
+    file = Path(local_path)
+    key = f"{prefix}/{file.name}" if prefix else file.name
 
     s3.upload_file(
-        Filename=str(local),
+        Filename=str(file),
         Bucket=bucket,
         Key=key,
-        ExtraArgs={"ContentType": content_type},
+        ExtraArgs={"ContentType": "video/mp4" if file.suffix == ".mp4" else "text/plain"},
     )
 
-    public_base = os.getenv("R2_PUBLIC_BASE_URL", "").rstrip("/")
-    return f"{public_base}/{key}"
+    base = os.getenv("R2_PUBLIC_BASE_URL").rstrip("/")
+    return f"{base}/{key}"
 
 
-# ======================================================
-# 0. DOWNLOAD VIDEO (R2 / direct mp4 / TikTok / YouTube)
-# ======================================================
+# ==========================================
+# 0. DOWNLOAD VIDEO
+# ==========================================
 
 def download_video(url: str) -> str:
-    print(f"⬇️ [DOWNLOAD] URL : {url}")
-    parsed = urlparse(url)
-    host = (parsed.netloc or "").lower()
+    print(f"⬇️ DOWNLOAD → {url}")
 
     dest = UPLOADS_DIR / f"input_{os.urandom(4).hex()}.mp4"
+    parsed = urlparse(url)
 
-    # 🟣 1. URL directe (R2, .mp4)
-    if url.endswith(".mp4") or "r2.dev" in host or "r2.cloudflarestorage.com" in host:
-        print("📥 Téléchargement direct HTTP ...")
-        try:
-            with requests.get(url, stream=True, timeout=120) as r:
-                r.raise_for_status()
-                with open(dest, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024*1024):
-                        if chunk:
-                            f.write(chunk)
-        except Exception as e:
-            raise Exception(f"Téléchargement direct HTTP a échoué : {e}")
-
+    # Télécharger direct si déjà mp4
+    if url.endswith(".mp4") or "r2.dev" in parsed.netloc:
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
     else:
-        # 🟣 2. Téléchargement via yt-dlp (YouTube, TikTok…)
-        try:
-            ua = (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123 Safari/537.36"
-            )
-
-            ydl_opts = {
-                "outtmpl": str(dest),
-                "format": "bv*+ba/best/b",
-                "merge_output_format": "mp4",
-                "noplaylist": True,
-                "quiet": True,
-                "user_agent": ua,
-                "http_headers": {"User-Agent": ua},
-            }
-
-            print("📥 yt-dlp ...")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-        except Exception as e:
-            raise Exception(f"yt-dlp a échoué : {e}")
+        # Mode yt-dlp
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        ydl_opts = {
+            "outtmpl": str(dest),
+            "format": "bv*+ba/best",
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "user_agent": ua,
+            "http_headers": {"User-Agent": ua},
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
     if not dest.exists() or dest.stat().st_size < 200_000:
-        raise Exception("Téléchargement incomplet ou fichier trop petit.")
+        raise Exception("Téléchargement incomplet")
 
-    print(f"✅ Vidéo téléchargée : {dest} ({dest.stat().st_size} bytes)")
     return str(dest)
 
 
-# ======================================================
-# EXTRACTION AUDIO COMPATIBLE WHISPER (<25MB)
-# ======================================================
+# ==========================================
+# AUDIO → WHISPER
+# ==========================================
 
-def extract_audio_mp3(video_path: str) -> str:
-    """
-    Extrait l'audio en MP3 à 64 kbps pour garantir <25MB même sur de longues vidéos.
-    """
-    audio_path = str(Path(video_path).with_suffix(".mp3"))
+def extract_audio(video: str):
+    audio = str(Path(video).with_suffix(".mp3"))
 
     cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", video_path,
+        "ffmpeg", "-y",
+        "-i", video,
         "-vn",
         "-acodec", "libmp3lame",
         "-b:a", "64k",
-        audio_path,
+        audio
     ]
 
-    print("🎧 Extraction audio :", " ".join(cmd))
     subprocess.run(cmd, check=True)
-
-    size = Path(audio_path).stat().st_size
-    print(f"🎧 Audio extrait ({size/1_000_000:.2f} Mo) → {audio_path}")
-
-    if size > 25_000_000:
-        raise Exception("Audio MP3 > 25 MB → réduire bitrate si besoin.")
-
-    return audio_path
+    return audio
 
 
-# ======================================================
-# TRANSCRIPTION WHISPER (avec MP3)
-# ======================================================
+def transcribe(video: str):
+    audio = extract_audio(video)
 
-def transcribe_with_whisper(video_path: str) -> Dict[str, Any]:
-    print("🎙️ Préparation Whisper...")
-
-    # 1) Extraire audio
-    audio_path = extract_audio_mp3(video_path)
-
-    # 2) Envoyer MP3 à Whisper
-    print("🎙️ Envoi MP3 → Whisper...")
-    with open(audio_path, "rb") as f:
+    with open(audio, "rb") as f:
         res = client.audio.transcriptions.create(
             model="whisper-1",
             file=f,
             response_format="verbose_json",
         )
 
-    segments = [
-        {"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
-        for s in res.segments
-    ]
+    segments = [{"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
+                for s in res.segments]
 
-    print(f"📌 Segments générés : {len(segments)}")
-
-    return {"text": res.text.strip(), "segments": segments}
+    return segments
 
 
-# ======================================================
-# SELECT VIRAL SEGMENTS (GPT)
-# ======================================================
+# ==========================================
+# GPT SELECTION — KLAP EXACT
+# ==========================================
 
-def select_viral_segments(segments, num_clips=8, min_duration=20, max_duration=45):
-    if not segments:
-        return []
-
+def select_clips(segments, num_clips=3):
     transcript = "\n".join(
-        f"[{s['start']:.2f} → {s['end']:.2f}] {s['text']}" for s in segments
+        f"[{s['start']:.2f} → {s['end']:.2f}] {s['text']}"
+        for s in segments
     )[:15000]
 
     system_prompt = (
-        "Tu es un expert TikTok/Shorts. "
-        "Donne les meilleurs moments viraux. "
-        "Réponds STRICTEMENT en JSON."
+        "Tu es KLAP.APP (version exacte). "
+        "Tu dois sélectionner EXACTEMENT les meilleurs moments viraux. "
+        "Pas de clips trop courts. "
+        "Chaque clip doit durer ENTRE 18 ET 35 SECONDES (comme KLAP). "
+        "Toujours renvoyer JSON strict."
     )
 
     user_prompt = f"""
 Transcription :
-
 {transcript}
 
-Choisis {num_clips} clips de {min_duration}-{max_duration} secondes.
+Sélectionne {num_clips} clips viraux.
 """
 
-    print("🤖 Appel GPT...")
-    completion = client.chat.completions.create(
-        model="gpt-4.1-mini",
+    res = client.chat.completions.create(
+        model="gpt-4.1",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -236,108 +183,94 @@ Choisis {num_clips} clips de {min_duration}-{max_duration} secondes.
         response_format={"type": "json_object"},
     )
 
-    data = json.loads(completion.choices[0].message.content)
-    clips = data.get("clips", [])
+    data = json.loads(res.choices[0].message.content)
 
-    final = []
-    for c in clips:
-        s, e = float(c["start"]), float(c["end"])
-        if e > s and (e - s) >= min_duration:
-            final.append({
-                "start": s,
-                "end": e,
-                "title": c.get("title", "Clip viral"),
-                "reason": c.get("reason", "")
-            })
+    clips = []
+    for c in data["clips"]:
+        s = float(c["start"])
+        e = float(c["end"])
+        dur = e - s
 
-    print(f"✅ Clips retenus : {len(final)}")
-    return final
+        # Ajustements exact KLAP
+        if dur < 18:
+            e = s + 18
+        if dur > 35:
+            e = s + 35
 
+        clips.append({
+            "start": s,
+            "end": e,
+            "title": c.get("title", "Clip viral"),
+            "reason": c.get("reason", "")
+        })
 
-# ======================================================
-# SUBS (ASS / KLAP STYLE)
-# ======================================================
-
-def _sanitize_ass_text(text):
-    cleaned = text.replace("\n", " ").replace("\r", " ")
-    cleaned = cleaned.replace("{", "(").replace("}", ")")
-    return " ".join(cleaned.split())
+    return clips
 
 
-def _split_into_lines(words, max_words_per_line=7):
-    if len(words) <= max_words_per_line:
-        return [words]
-    mid = len(words) // 2
-    return [words[:mid], words[mid:]]
+# ==========================================
+# SUBTITLES — KLAP EXACT STYLE
+# ==========================================
 
-
-def build_karaoke_text(text, start, end):
-    clean = _sanitize_ass_text(text)
-    words = clean.split()
+def build_ass(text, start, end):
+    words = text.strip().split()
     if not words:
         return ""
 
-    duration_ms = max((end - start) * 1000, 1)
-    per_word = max(int(duration_ms / len(words)), 1)
+    duration_ms = max(int((end - start) * 1000), 200)
+    per_word = max(duration_ms // len(words), 15)
 
-    lines = _split_into_lines(words)
-    ass_lines = [" ".join([f"{{\\k{per_word}}}{w}" for w in line]) for line in lines]
+    line = " ".join([f"{{\\k{per_word}}}{w}" for w in words])
 
-    return r"{\an2\fad(80,120)}" + r"\N".join(ass_lines)
+    return (
+        r"{\an2\fs50\bord2\shad0\1c&Hffffff&\3c&H202020&\fad(80,80)}" +
+        line
+    )
 
 
-def generate_ass_subs_for_clip(clip_start, clip_end, segments, subs_path):
+def make_ass(clip_start, clip_end, segments, path):
     subs = pysubs2.SSAFile()
 
     style = pysubs2.SSAStyle()
-    style.name = "KlapMain"
+    style.name = "Main"
     style.fontname = "Poppins"
-    style.fontsize = 64
-    style.bold = True
-    style.primarycolor = pysubs2.Color(255, 255, 255)
-    style.secondarycolor = pysubs2.Color(255, 220, 0)
-    style.outlinecolor = pysubs2.Color(0, 0, 0)
-    style.marginv = 120
+    style.fontsize = 50
+    style.bold = False
+    style.marginv = 140
     style.alignment = 2
-
-    subs.styles[style.name] = style
+    subs.styles["Main"] = style
 
     for seg in segments:
         if seg["end"] <= clip_start or seg["start"] >= clip_end:
             continue
 
-        start = max(seg["start"], clip_start) - clip_start
-        end = min(seg["end"], clip_end) - clip_start
-
-        ktext = build_karaoke_text(seg["text"], seg["start"], seg["end"])
-        if not ktext:
-            continue
+        st = max(seg["start"], clip_start) - clip_start
+        en = min(seg["end"], clip_end) - clip_start
 
         subs.events.append(
             pysubs2.SSAEvent(
-                start=int(start * 1000),
-                end=int(end * 1000),
-                style="KlapMain",
-                text=ktext,
+                start=int(st * 1000),
+                end=int(en * 1000),
+                style="Main",
+                text=build_ass(seg["text"], st, en),
             )
         )
 
-    subs.save(str(subs_path))
+    subs.save(path)
 
 
-# ======================================================
-# FFMPEG CLIP EXPORT
-# ======================================================
+# ==========================================
+# FFMPEG EXPORT
+# ==========================================
 
-def ffmpeg_extract_and_style(src, out, subs, start, end):
-    duration = max(end - start, 0.5)
+def render_clip(src, out, subs, start, end):
+    dur = max(end - start, 1)
 
     vf = f"scale=-2:1920,crop=1080:1920,subtitles='{subs}'"
 
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start), "-i", src,
-        "-t", str(duration),
+        "-t", str(dur),
         "-vf", vf,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
         "-pix_fmt", "yuv420p",
@@ -345,57 +278,31 @@ def ffmpeg_extract_and_style(src, out, subs, start, end):
         out,
     ]
 
-    print("🎬 FFmpeg :", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
 
-# ======================================================
-# PIPELINE GLOBAL
-# ======================================================
+# ==========================================
+# PIPELINE KLAP EXACT
+# ==========================================
 
-def generate_shorts(
-    input_video_path,
-    num_clips=8,
-    min_duration=20,
-    max_duration=45,
-):
-    video = Path(input_video_path)
-    if not video.exists():
-        raise FileNotFoundError(video)
-
-    print("🚀 Lancement pipeline IA...")
-
-    # 1) Whisper
-    tr = transcribe_with_whisper(str(video))
-    segments = tr["segments"]
-
-    # 2) GPT viral
-    viral = select_viral_segments(segments, num_clips, min_duration, max_duration)
+def generate_shorts(video_path, num_clips=3):
+    segments = transcribe(video_path)
+    clips = select_clips(segments, num_clips)
 
     results = []
-
-    # 3) Génération des shorts
-    for i, c in enumerate(viral, start=1):
+    for i, c in enumerate(clips, 1):
         out_vid = SHORTS_DIR / f"short_{i:02d}.mp4"
         out_ass = SUBS_DIR / f"short_{i:02d}.ass"
 
-        print(f"▶️ Clip {i} | {c['start']} → {c['end']}")
-
-        generate_ass_subs_for_clip(c["start"], c["end"], segments, out_ass)
-        ffmpeg_extract_and_style(str(video), str(out_vid), str(out_ass), c["start"], c["end"])
-
-        video_url = upload_to_r2(str(out_vid), key_prefix="shorts")
-        subs_url = upload_to_r2(str(out_ass), key_prefix="subs")
+        make_ass(c["start"], c["end"], segments, out_ass)
+        render_clip(video_path, out_vid, out_ass, c["start"], c["end"])
 
         results.append({
             "index": i,
             "title": c["title"],
             "reason": c["reason"],
-            "start": c["start"],
-            "end": c["end"],
-            "video_url": video_url,
-            "subs_url": subs_url,
+            "video_url": upload_to_r2(str(out_vid), "shorts"),
+            "subs_url": upload_to_r2(str(out_ass), "subs"),
         })
 
-    print("🎉 Shorts générés :", len(results))
     return results
