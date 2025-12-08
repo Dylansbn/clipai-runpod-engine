@@ -18,5 +18,5 @@ COPY . .
 
 EXPOSE 8000
 
-# Lance le worker en arrière-plan puis l'API
+# Lance le worker en arrière-plan, puis l’API FastAPI
 CMD bash -c "python3 -m clipai_runpod_engine.engine.worker & uvicorn handler:app --host 0.0.0.0 --port 8000"
