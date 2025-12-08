@@ -2,6 +2,7 @@ FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Installation des dépendances système
 RUN apt-get update && apt-get install -y \
     tzdata \
     ffmpeg \
@@ -14,15 +15,15 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Copie et installation des dépendances Python
 COPY requirements.txt .
-
-# Utiliser une seule commande pour installer toutes les dépendances, incluant NumPy
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copie du reste du code et du script d'entrée
 COPY . .
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-CMD bash -c "\
-    uvicorn clipai_runpod_engine.handler:app --host 0.0.0.0 --port 8000 & \
-    python3 -m clipai_runpod_engine.engine.worker \
-"
+# Utilisation du script d'entrée pour lancer les deux processus
+CMD ["/app/entrypoint.sh"]
