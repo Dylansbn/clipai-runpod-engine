@@ -1,6 +1,5 @@
 FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
-# Empêche tzdata de bloquer le build
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
@@ -17,7 +16,11 @@ WORKDIR /app
 
 COPY requirements.txt .
 
+# 🔥 FIX NUMPY + TORCH COMPATIBILITY
 RUN pip install --upgrade pip
+RUN pip install "numpy<2.0"
+
+# Puis installation normale
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
