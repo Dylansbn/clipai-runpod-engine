@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Login to GitHub Container Registry
@@ -17,13 +17,12 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Build image
+      - name: Build Docker image
         run: |
-          docker build -t ghcr.io/${{ github.repository_owner }}/clipai-runpod-engine:latest .
+          docker build -t ghcr.io/${{ github.repository }}/engine:latest .
 
-      - name: Push image
+      - name: Push Docker image
         run: |
-          docker push ghcr.io/${{ github.repository_owner }}/clipai-runpod-engine:latest
-
+          docker push ghcr.io/${{ github.repository }}/engine:latest
