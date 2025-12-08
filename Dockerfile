@@ -14,17 +14,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# ---------------------------
-# Properly package your code
-# ---------------------------
-COPY . /app/
-
-RUN mkdir -p /app/clipai_runpod_engine && \
-    mv /app/engine /app/clipai_runpod_engine/ && \
-    mv /app/job_queue /app/clipai_runpod_engine/ && \
-    mv /app/shared /app/clipai_runpod_engine/ && \
-    mv /app/subs /app/clipai_runpod_engine/ && \
-    mv /app/shorts /app/clipai_runpod_engine/ && \
-    mv /app/uploads /app/clipai_runpod_engine/
+COPY . .
 
 CMD ["python3", "-m", "clipai_runpod_engine.engine.worker"]
