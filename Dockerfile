@@ -16,4 +16,4 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python3", "-m", "clipai_runpod_engine.engine.worker"]
+CMD ["bash", "-c", "python3 -m clipai_runpod_engine.engine.worker"]
