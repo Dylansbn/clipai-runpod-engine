@@ -26,3 +26,4 @@ CMD bash -c "\
     uvicorn clipai_runpod_engine.handler:app --host 0.0.0.0 --port 8000 & \
     python3 -m clipai_runpod_engine.engine.worker \
 "
+
