@@ -16,11 +16,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# 🔥 FIX NUMPY + TORCH COMPATIBILITY
+# Utiliser une seule commande pour installer toutes les dépendances, incluant NumPy
 RUN pip install --upgrade pip
-RUN pip install "numpy<2.0"
-
-# Puis installation normale
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
