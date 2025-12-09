@@ -5,14 +5,13 @@ WORKDIR /app
 # ... (Installation de requirements.txt)
 
 # ==========================================================
-# 🚀 ÉTAPE D'OPTIMISATION DU DÉMARRAGE (CORRIGE LE DÉLAI DE 24 MIN)
-# Nouvelle tentative : on lance simplement le Worker pour une fois, 
-# ce qui force le téléchargement du modèle 'medium' dans le cache.
+# 🚀 ÉTAPE D'OPTIMISATION DU DÉMARRAGE (CORRECTIF 24 MIN)
+# Nouvelle et dernière tentative : Utilisation de la fonction download_model.
 # ==========================================================
-# Copie temporaire du code nécessaire au téléchargement
+# Copie temporaire du code pour que Python trouve le chemin de faster-whisper
 COPY clipai_runpod_engine /app/clipai_runpod_engine
-# Lance une commande Python simple qui utilise le modèle
-RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('medium')"
+# Lance la fonction de téléchargement directement
+RUN python3 -c "from faster_whisper.utils import download_model; download_model('medium', '/root/.cache/faster-whisper')"
 # ==========================================================
 
 # Copie du reste du code et du script d'entrée
