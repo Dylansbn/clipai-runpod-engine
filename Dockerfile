@@ -20,6 +20,13 @@ COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
+# ==========================================================
+# 🚀 ÉTAPE D'OPTIMISATION : PRÉ-TÉLÉCHARGEMENT DU MODÈLE WHISPER (CORRIGE LE DÉLAI DE 24 MIN)
+# ==========================================================
+# Le modèle "medium" est celui utilisé par défaut sur RunPod. 
+# Cette commande télécharge et met en cache les 3.44GB de modèle, une seule fois.
+RUN python3 -c "from faster_whisper import download_model; download_model('medium', local_model_path='/root/.cache/whisper')"
+
 # Copie du reste du code et du script d'entrée
 COPY . .
 COPY entrypoint.sh /app/entrypoint.sh
