@@ -29,3 +29,5 @@ COPY . .
 
 # Commande de démarrage RunPod
 CMD ["python3", "-u", "-m", "clipai_runpod_engine.handler"]
+
+
