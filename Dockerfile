@@ -1,8 +1,9 @@
+# ---- BASE CUDA COMPATIBLE WHISPER GPU ----
 FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Dépendances système
+# ---- Dépendances système ----
 RUN apt-get update && apt-get install -y \
     tzdata \
     ffmpeg \
@@ -16,23 +17,23 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-# Dépendances Python
+# ---- Dépendances Python ----
 COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install PyTorch compatible CUDA 12.4
+# ---- INSTALL PyTorch pour CUDA 12.4 ----
 RUN pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
 
-# Code
+# ---- Code ----
 COPY clipai_runpod_engine /app/clipai_runpod_engine
 COPY . .
 
-# Pré-chargement Whisper
+# ---- Pré-charger Whisper pour éviter le crash ----
 RUN python3 - <<EOF
 from faster_whisper import WhisperModel
 WhisperModel("medium")
 EOF
 
-# Démarrage RunPod serverless
+# ---- Handler RunPod ----
 CMD ["python3", "-u", "-m", "clipai_runpod_engine.handler"]
